@@ -1,0 +1,155 @@
+import { getDiscordToken, saveLogsToSupabase, MessageToSave } from "./supabase.js";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || "1409880028958822490";
+
+// Extrair timestamp do conteúdo da mensagem
+function extractTimestampFromContent(content: string): string | null {
+  const timestampMatch = content.match(/`(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}:\d{2})`/);
+  if (!timestampMatch) return null;
+
+  const timestamp = timestampMatch[1];
+
+  // Converter DD/MM/YYYY HH:MM:SS para formato PostgreSQL
+  const [datePart, timePart] = timestamp.split(" ");
+  const [day, month, year] = datePart.split("/");
+  const [hour, minute, second] = timePart.split(":");
+
+  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")} ${hour.padStart(2, "0")}:${minute.padStart(2, "0")}:${second.padStart(2, "0")}`;
+}
+
+// Criar headers para requisição ao Discord
+function createDiscordHeaders(authToken: string): Headers {
+  const headers = new Headers();
+  headers.append("accept", "*/*");
+  headers.append("accept-language", "en-US,en-CA;q=0.9,en;q=0.8,pt;q=0.7");
+  headers.append("authorization", authToken);
+  headers.append("priority", "u=1, i");
+  headers.append("referer", `https://discord.com/channels/1148014075683545098/${DISCORD_CHANNEL_ID}`);
+  headers.append("sec-ch-ua", '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"');
+  headers.append("sec-ch-ua-mobile", "?0");
+  headers.append("sec-ch-ua-platform", '"Windows"');
+  headers.append("sec-fetch-dest", "empty");
+  headers.append("sec-fetch-mode", "cors");
+  headers.append("sec-fetch-site", "same-origin");
+  headers.append(
+    "user-agent",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+  );
+  headers.append("x-debug-options", "bugReporterEnabled");
+  headers.append("x-discord-locale", "pt-BR");
+  headers.append("x-discord-timezone", "America/Sao_Paulo");
+  headers.append(
+    "x-super-properties",
+    "eyJvcyI6IldpbmRvd3MiLCJicm93c2VyIjoiQ2hyb21lIiwiZGV2aWNlIjoiIiwic3lzdGVtX2xvY2FsZSI6ImVuLVVTIiwiaGFzX2NsaWVudF9tb2RzIjpmYWxzZSwiYnJvd3Nlcl91c2VyX2FnZW50IjoiTW96aWxsYS81LjAgKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NCkgQXBwbGVXZWJLaXQvNTM3LjM2IChLSFRNTCwgbGlrZSBHZWNrbykgQ2hyb21lLzE0MS4wLjAuMCBTYWZhcmkvNTM3LjM2Iiwib3NfdmVyc2lvbiI6IjEwIiwicmVmZXJyZXIiOiJodHRwczovL3d3dy5nb29nbGUuY29tLyIsInJlZmVycmluZ19kb21haW4iOiJ3d3cuZ29vZ2xlLmNvbSIsInNlYXJjaF9lbmdpbmUiOiJnb29nbGUiLCJyZWZlcnJlcl9jdXJyZW50IjoiIiwicmVmZXJyaW5nX2RvbWFpbl9jdXJyZW50IjoiIiwicmVsZWFzZV9jaGFubmVsIjoic3RhYmxlIiwiY2xpZW50X2J1aWxkX251bWJlciI6NDU2ODgyLCJjbGllbnRfZXZlbnRfc291cmNlIjpudWxsLCJjbGllbnRfbGF1bmNoX2lkIjoiNDkyNzIzODItZjE2OC00ZjViLWIyNmMtN2VjM2M3OTc2YTc4IiwibGF1bmNoX3NpZ25hdHVyZSI6ImYxNzM2N2MxLTI3ZTctNDc5Mi05YjcyLThmOTYyODZlMDFiZCIsImNsaWVudF9oZWFydGJlYXRfc2Vzc2lvbl9pZCI6IjlhNTgyYTQzLTc0ZTktNDY4OS1hZmZjLWQ1MTFjMGMxOWJjYiIsImNsaWVudF9hcHBfc3RhdGUiOiJmb2N1c2VkIn0="
+  );
+
+  return headers;
+}
+
+interface DiscordMessage {
+  id: string;
+  content: string;
+  timestamp: string;
+  author: {
+    id: string;
+    username: string;
+  };
+}
+
+// Buscar mensagens do Discord
+export async function fetchDiscordMessages(limit: number = 100, after?: string): Promise<DiscordMessage[]> {
+  const authToken = await getDiscordToken();
+
+  if (!authToken) {
+    throw new Error("Token de autenticação não configurado no Supabase");
+  }
+
+  const headers = createDiscordHeaders(authToken);
+
+  let discordApiUrl = `https://discord.com/api/v9/channels/${DISCORD_CHANNEL_ID}/messages?limit=${limit}`;
+  if (after) {
+    discordApiUrl += `&after=${after}`;
+    console.log(`🔄 Buscando mensagens APÓS ID: ${after}`);
+  }
+
+  const response = await fetch(discordApiUrl, {
+    method: "GET",
+    headers
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Erro na API do Discord: ${response.status} ${response.statusText} - ${errorText}`);
+  }
+
+  return response.json();
+}
+
+// Processar mensagens e salvar no banco
+export async function processAndSaveMessages(): Promise<{ total: number; saved: number }> {
+  try {
+    console.log("🔍 Buscando mensagens do Discord...");
+    
+    const messages = await fetchDiscordMessages(100);
+    
+    if (!messages || messages.length === 0) {
+      console.log("📭 Nenhuma mensagem nova encontrada");
+      return { total: 0, saved: 0 };
+    }
+
+    console.log(`📨 ${messages.length} mensagens recebidas da API`);
+
+    const messagesToSave: MessageToSave[] = [];
+
+    for (const message of messages) {
+      if (message.content && message.id) {
+        // Verificar se há múltiplas mensagens separadas por \r\n
+        const contentLines = message.content.split(/\r?\n/).filter((line: string) => line.trim().length > 0);
+
+        if (contentLines.length > 1) {
+          console.log(`⚠️ Mensagem composta detectada com ${contentLines.length} linhas (ID: ${message.id})`);
+
+          contentLines.forEach((line: string, index: number) => {
+            const pgTimestamp = extractTimestampFromContent(line);
+            if (pgTimestamp) {
+              messagesToSave.push({
+                content: line,
+                timestamp: pgTimestamp,
+                id_message: `${message.id}_${index}`
+              });
+            }
+          });
+        } else {
+          const pgTimestamp = extractTimestampFromContent(message.content);
+          if (pgTimestamp) {
+            messagesToSave.push({
+              content: message.content,
+              timestamp: pgTimestamp,
+              id_message: message.id
+            });
+          }
+        }
+      }
+    }
+
+    let savedCount = 0;
+    if (messagesToSave.length > 0) {
+      savedCount = await saveLogsToSupabase(messagesToSave);
+    }
+
+    const statusMsg =
+      messages.length === 0
+        ? "Nenhuma mensagem nova (já está sincronizado)"
+        : `Mensagens da API: ${messages.length} | Novas salvas: ${savedCount}`;
+
+    console.log(`📊 ${statusMsg}`);
+
+    return { total: messages.length, saved: savedCount };
+  } catch (error) {
+    console.error("❌ Erro ao processar mensagens:", error);
+    throw error;
+  }
+}

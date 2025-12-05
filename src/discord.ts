@@ -1,4 +1,4 @@
-import { getDiscordToken, saveLogsToSupabase, MessageToSave } from "./supabase.js";
+import { getDiscordToken, saveLogsToSupabase, MessageToSave, getLastMessageId } from "./supabase.js";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -17,7 +17,10 @@ function extractTimestampFromContent(content: string): string | null {
   const [day, month, year] = datePart.split("/");
   const [hour, minute, second] = timePart.split(":");
 
-  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")} ${hour.padStart(2, "0")}:${minute.padStart(2, "0")}:${second.padStart(2, "0")}`;
+  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")} ${hour.padStart(2, "0")}:${minute.padStart(
+    2,
+    "0"
+  )}:${second.padStart(2, "0")}`;
 }
 
 // Criar headers para requisição ao Discord
@@ -88,66 +91,125 @@ export async function fetchDiscordMessages(limit: number = 100, after?: string):
   return response.json();
 }
 
-// Processar mensagens e salvar no banco
+// Processar mensagens de uma página e retornar dados para salvar
+function processMessagesPage(messages: DiscordMessage[]): MessageToSave[] {
+  const messagesToSave: MessageToSave[] = [];
+
+  for (const message of messages) {
+    if (message.content && message.id) {
+      // Verificar se há múltiplas mensagens separadas por \r\n
+      const contentLines = message.content.split(/\r?\n/).filter((line: string) => line.trim().length > 0);
+
+      if (contentLines.length > 1) {
+        console.log(`⚠️ Mensagem composta detectada com ${contentLines.length} linhas (ID: ${message.id})`);
+
+        contentLines.forEach((line: string, index: number) => {
+          const pgTimestamp = extractTimestampFromContent(line);
+          if (pgTimestamp) {
+            messagesToSave.push({
+              content: line,
+              timestamp: pgTimestamp,
+              id_message: `${message.id}_${index}`
+            });
+          }
+        });
+      } else {
+        const pgTimestamp = extractTimestampFromContent(message.content);
+        if (pgTimestamp) {
+          messagesToSave.push({
+            content: message.content,
+            timestamp: pgTimestamp,
+            id_message: message.id
+          });
+        }
+      }
+    }
+  }
+
+  return messagesToSave;
+}
+
+// Processar mensagens e salvar no banco - COM PAGINAÇÃO COMPLETA
 export async function processAndSaveMessages(): Promise<{ total: number; saved: number }> {
   try {
     console.log("🔍 Buscando mensagens do Discord...");
-    
-    const messages = await fetchDiscordMessages(100);
-    
-    if (!messages || messages.length === 0) {
+
+    // Buscar o ID da última mensagem salva para otimizar a busca
+    const lastMessageId = await getLastMessageId();
+    let afterId: string | undefined;
+
+    if (lastMessageId) {
+      // Remove sufixo de mensagens compostas (ex: "123456_0" -> "123456")
+      afterId = lastMessageId.split("_")[0];
+      console.log(`📌 Última mensagem salva: ${afterId} - Buscando apenas mensagens novas...`);
+    }
+
+    let allMessages: DiscordMessage[] = [];
+    let hasMoreMessages = true;
+    let currentAfterId = afterId;
+    let pageCount = 0;
+    const MAX_PAGES = 50; // Limite de segurança para evitar loops infinitos
+
+    // PAGINAÇÃO: Buscar TODAS as mensagens novas, não apenas 100
+    while (hasMoreMessages && pageCount < MAX_PAGES) {
+      pageCount++;
+      console.log(`📄 Buscando página ${pageCount}...`);
+
+      const messages = await fetchDiscordMessages(100, currentAfterId);
+
+      if (!messages || messages.length === 0) {
+        hasMoreMessages = false;
+        break;
+      }
+
+      console.log(`   ➡️ Recebidas ${messages.length} mensagens na página ${pageCount}`);
+      allMessages = allMessages.concat(messages);
+
+      // Se recebemos menos de 100, não há mais mensagens
+      if (messages.length < 100) {
+        hasMoreMessages = false;
+      } else {
+        // Próxima página: usar o ID da última mensagem recebida
+        // A API do Discord com 'after' retorna do mais antigo ao mais recente
+        // Então pegamos o ID mais alto (último do array) para a próxima página
+        const lastMsg = messages[messages.length - 1];
+        currentAfterId = lastMsg.id;
+        console.log(`   🔄 Próxima página após ID: ${currentAfterId}`);
+      }
+
+      // Pequena pausa para não sobrecarregar a API do Discord
+      if (hasMoreMessages) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+
+    if (allMessages.length === 0) {
       console.log("📭 Nenhuma mensagem nova encontrada");
       return { total: 0, saved: 0 };
     }
 
-    console.log(`📨 ${messages.length} mensagens recebidas da API`);
+    console.log(`📨 Total de ${allMessages.length} mensagens recebidas da API (${pageCount} páginas)`);
 
-    const messagesToSave: MessageToSave[] = [];
+    // Processar todas as mensagens
+    const messagesToSave = processMessagesPage(allMessages);
 
-    for (const message of messages) {
-      if (message.content && message.id) {
-        // Verificar se há múltiplas mensagens separadas por \r\n
-        const contentLines = message.content.split(/\r?\n/).filter((line: string) => line.trim().length > 0);
-
-        if (contentLines.length > 1) {
-          console.log(`⚠️ Mensagem composta detectada com ${contentLines.length} linhas (ID: ${message.id})`);
-
-          contentLines.forEach((line: string, index: number) => {
-            const pgTimestamp = extractTimestampFromContent(line);
-            if (pgTimestamp) {
-              messagesToSave.push({
-                content: line,
-                timestamp: pgTimestamp,
-                id_message: `${message.id}_${index}`
-              });
-            }
-          });
-        } else {
-          const pgTimestamp = extractTimestampFromContent(message.content);
-          if (pgTimestamp) {
-            messagesToSave.push({
-              content: message.content,
-              timestamp: pgTimestamp,
-              id_message: message.id
-            });
-          }
-        }
-      }
-    }
+    console.log(`📝 ${messagesToSave.length} registros prontos para salvar`);
 
     let savedCount = 0;
     if (messagesToSave.length > 0) {
-      savedCount = await saveLogsToSupabase(messagesToSave);
+      // Salvar em lotes de 500 para evitar problemas com payloads grandes
+      const BATCH_SIZE = 500;
+      for (let i = 0; i < messagesToSave.length; i += BATCH_SIZE) {
+        const batch = messagesToSave.slice(i, i + BATCH_SIZE);
+        const batchSaved = await saveLogsToSupabase(batch);
+        savedCount += batchSaved;
+        console.log(`   💾 Lote ${Math.floor(i / BATCH_SIZE) + 1}: ${batchSaved} registros salvos`);
+      }
     }
 
-    const statusMsg =
-      messages.length === 0
-        ? "Nenhuma mensagem nova (já está sincronizado)"
-        : `Mensagens da API: ${messages.length} | Novas salvas: ${savedCount}`;
+    console.log(`📊 Resultado Final: ${allMessages.length} mensagens da API | ${savedCount} registros salvos no banco`);
 
-    console.log(`📊 ${statusMsg}`);
-
-    return { total: messages.length, saved: savedCount };
+    return { total: allMessages.length, saved: savedCount };
   } catch (error) {
     console.error("❌ Erro ao processar mensagens:", error);
     throw error;

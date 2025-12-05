@@ -1,6 +1,9 @@
 import { processAndSaveMessages } from "../src/discord.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
+// Chave secreta para proteger o endpoint (opcional - configure no Vercel)
+const CRON_SECRET = process.env.CRON_SECRET;
+
 // Configurações de horário
 const START_HOUR = parseInt(process.env.START_HOUR || "20");
 const END_HOUR = parseInt(process.env.END_HOUR || "23");
@@ -22,6 +25,17 @@ function isWithinSchedule(): boolean {
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   console.log(`⏰ Cron executado em: ${new Date().toISOString()}`);
+
+  // Verificar autorização (Vercel Cron envia header específico)
+  const authHeader = req.headers.authorization;
+  const isVercelCron = authHeader === `Bearer ${CRON_SECRET}`;
+  const isManualWithSecret = req.query.secret === CRON_SECRET;
+
+  // Se CRON_SECRET está configurado, validar acesso
+  if (CRON_SECRET && !isVercelCron && !isManualWithSecret) {
+    console.log("⛔ Acesso não autorizado ao cron");
+    return res.status(401).json({ error: "Unauthorized" });
+  }
 
   // Verificar se está dentro do horário
   if (!isWithinSchedule()) {
@@ -56,5 +70,5 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
 // Config para Vercel
 export const config = {
-  maxDuration: 10 // máximo 10 segundos no plano gratuito
+  maxDuration: 60 // aumentado para suportar paginação completa
 };

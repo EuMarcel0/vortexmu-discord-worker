@@ -2,10 +2,16 @@ name: Discord Worker - Captura de Logs (Mu online - Vortex MU)
 
 on:
   schedule:
-    # Executa a cada 2 minutos, das 20h às 23h59 (horário UTC-3 = 23h às 02h59 UTC)
-    - cron: "*/2 23 * * *" # 20:00-20:59 BRT
-    - cron: "*/2 0-2 * * *" # 21:00-23:59 BRT
+    # Executa a cada 1 minuto, das 20h às 23h59 (horário UTC-3 = 23h às 02h59 UTC)
+    - cron: "* 23 * * *" # 20:00-20:59 BRT
+    - cron: "* 0 * * *" # 21:00-21:59 BRT
+    - cron: "* 1 * * *" # 22:00-22:59 BRT
+    - cron: "* 2 * * *" # 23:00-23:59 BRT
   workflow_dispatch: # Permite execução manual
+
+concurrency:
+  group: discord-worker
+  cancel-in-progress: false
 
 jobs:
   capture-logs:
@@ -36,7 +42,7 @@ jobs:
         run: |
           CURRENT_HOUR=$(TZ=America/Sao_Paulo date +%H)
           echo "⏰ Hora atual em São Paulo: $CURRENT_HOUR:$(TZ=America/Sao_Paulo date +%M)"
-          
+
           # Se for execução manual (workflow_dispatch), sempre executa
           # Se for agendado (schedule), verifica o horário
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then

@@ -113,3 +113,45 @@ export async function getLastMessageId(): Promise<string | null> {
     return null;
   }
 }
+
+// Verificar se já temos logs salvos do horário de hoje (20h-23h59)
+export async function hasLogsFromTodaySession(): Promise<boolean> {
+  try {
+    const supabase = getSupabaseClient();
+    
+    // Calcular o início da sessão de hoje (20:00 horário de São Paulo)
+    const now = new Date();
+    const offset = -3; // UTC-3 São Paulo
+    const localHour = (now.getUTCHours() + offset + 24) % 24;
+    
+    // Se estamos entre 20h e 23h59, verificar se há logs de hoje após as 20h
+    if (localHour >= 20 && localHour <= 23) {
+      // Data de hoje às 20:00 em UTC (23:00 UTC = 20:00 BRT)
+      const todayStart = new Date(now);
+      todayStart.setUTCHours(23, 0, 0, 0); // 20:00 BRT = 23:00 UTC
+      
+      // Se já passou da meia-noite UTC mas ainda é antes das 3h UTC (ainda é o mesmo dia em BRT)
+      if (now.getUTCHours() < 3) {
+        todayStart.setUTCDate(todayStart.getUTCDate() - 1);
+      }
+      
+      const { data, error } = await supabase
+        .from("logs_pvp")
+        .select("id")
+        .gte("created_at", todayStart.toISOString())
+        .limit(1);
+      
+      if (error) {
+        console.error("❌ Erro ao verificar logs de hoje:", error.message);
+        return false;
+      }
+      
+      return data && data.length > 0;
+    }
+    
+    return false;
+  } catch (error) {
+    console.error("❌ Erro ao verificar logs de hoje:", error);
+    return false;
+  }
+}

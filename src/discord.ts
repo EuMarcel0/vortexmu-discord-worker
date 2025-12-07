@@ -1,4 +1,4 @@
-import { getDiscordToken, saveLogsToSupabase, MessageToSave, getLastMessageId } from "./supabase.js";
+import { getDiscordToken, saveLogsToSupabase, MessageToSave, getLastMessageId, hasLogsFromTodaySession } from "./supabase.js";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -134,23 +134,31 @@ export async function processAndSaveMessages(): Promise<{ total: number; saved: 
   try {
     console.log("🔍 Buscando mensagens do Discord...");
 
-    // Buscar o ID da última mensagem salva para otimizar a busca
-    const lastMessageId = await getLastMessageId();
+    // Verificar se já temos logs da sessão de hoje
+    const hasTodayLogs = await hasLogsFromTodaySession();
     let afterId: string | undefined;
 
-    if (lastMessageId) {
-      // Remove sufixo de mensagens compostas (ex: "123456_0" -> "123456")
-      afterId = lastMessageId.split("_")[0];
-      console.log(`📌 Última mensagem salva: ${afterId} - Buscando apenas mensagens novas...`);
+    if (hasTodayLogs) {
+      // Já temos logs de hoje, buscar apenas as novas
+      const lastMessageId = await getLastMessageId();
+      if (lastMessageId) {
+        afterId = lastMessageId.split("_")[0];
+        console.log(`📌 Continuando sessão de hoje. Última msg: ${afterId}`);
+      }
+    } else {
+      // Primeira execução do dia! Buscar apenas as 100 mais recentes
+      console.log(`🆕 Primeira execução da sessão! Buscando apenas as 100 mais recentes...`);
+      afterId = undefined; // Sem 'after' = busca as mais recentes
     }
 
     let allMessages: DiscordMessage[] = [];
     let hasMoreMessages = true;
     let currentAfterId = afterId;
     let pageCount = 0;
-    // Limite de 10 páginas por execução (1000 mensagens)
-    // Como roda a cada 1 min, vai alcançar logs pendentes rapidamente
-    const MAX_PAGES = 10;
+    
+    // Na primeira execução do dia, buscar apenas 1 página (100 msgs mais recentes)
+    // Nas próximas, buscar até 10 páginas de novas mensagens
+    const MAX_PAGES = hasTodayLogs ? 10 : 1;
     const startTime = Date.now();
     const MAX_EXECUTION_TIME = 25000; // 25 segundos max para ter margem
 

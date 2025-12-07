@@ -90,3 +90,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   }
 }
+
+// Config para Vercel - plano gratuito suporta até 60s
+export const config = {
+  maxDuration: 60
+};

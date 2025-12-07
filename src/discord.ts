@@ -148,10 +148,20 @@ export async function processAndSaveMessages(): Promise<{ total: number; saved: 
     let hasMoreMessages = true;
     let currentAfterId = afterId;
     let pageCount = 0;
-    const MAX_PAGES = 50; // Limite de segurança para evitar loops infinitos
+    // Limite de 10 páginas por execução (1000 mensagens)
+    // Como roda a cada 1 min, vai alcançar logs pendentes rapidamente
+    const MAX_PAGES = 10;
+    const startTime = Date.now();
+    const MAX_EXECUTION_TIME = 25000; // 25 segundos max para ter margem
 
-    // PAGINAÇÃO: Buscar TODAS as mensagens novas, não apenas 100
+    // PAGINAÇÃO: Buscar mensagens novas com limite de tempo
     while (hasMoreMessages && pageCount < MAX_PAGES) {
+      // Verificar se ainda temos tempo
+      if (Date.now() - startTime > MAX_EXECUTION_TIME) {
+        console.log(`⏱️ Limite de tempo atingido após ${pageCount} páginas. Continuará na próxima execução.`);
+        break;
+      }
+
       pageCount++;
       console.log(`📄 Buscando página ${pageCount}...`);
 
@@ -170,16 +180,14 @@ export async function processAndSaveMessages(): Promise<{ total: number; saved: 
         hasMoreMessages = false;
       } else {
         // Próxima página: usar o ID da última mensagem recebida
-        // A API do Discord com 'after' retorna do mais antigo ao mais recente
-        // Então pegamos o ID mais alto (último do array) para a próxima página
         const lastMsg = messages[messages.length - 1];
         currentAfterId = lastMsg.id;
         console.log(`   🔄 Próxima página após ID: ${currentAfterId}`);
       }
 
-      // Pequena pausa para não sobrecarregar a API do Discord
+      // Pausa reduzida para ser mais rápido
       if (hasMoreMessages) {
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
     }
 
